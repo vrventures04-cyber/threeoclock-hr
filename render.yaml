@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: threeoclock-hr
+    runtime: python
+    plan: free
+    buildCommand: ""
+    startCommand: python3 server.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: GIST_ID
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
