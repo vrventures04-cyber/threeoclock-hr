@@ -687,12 +687,47 @@ function requireOwner() {
   return true;
 }
 
+function timeToMinutes(time) {
+  const [h, m] = String(time || "")
+    .split(":")
+    .map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+
+function spanMinutes(start, end) {
+  const a = timeToMinutes(start);
+  const b0 = timeToMinutes(end);
+  if (a == null || b0 == null) return 0;
+  let b = b0;
+  if (b <= a) b += 24 * 60;
+  return b - a;
+}
+
+function overlapMinutes(start, end, gapStart, gapEnd) {
+  const a = timeToMinutes(start);
+  let b = timeToMinutes(end);
+  const g1 = timeToMinutes(gapStart);
+  const g2 = timeToMinutes(gapEnd);
+  if ([a, b, g1, g2].some((n) => n == null)) return 0;
+  if (b <= a) b += 24 * 60;
+  return Math.max(0, Math.min(b, g2) - Math.max(a, g1));
+}
+
 function workedHours(record) {
   if (!["present", "late"].includes(record.status)) return 0;
-  let hours = 0;
-  if (record.clockIn && record.clockOut) hours += hoursBetween(record.clockIn, record.clockOut);
-  if (record.clockIn2 && record.clockOut2) hours += hoursBetween(record.clockIn2, record.clockOut2);
-  return Math.round(hours * 10) / 10;
+  const spec = SHIFTS[record.shift];
+  const segments = [];
+  if (record.clockIn && record.clockOut) segments.push([record.clockIn, record.clockOut]);
+  if (record.clockIn2 && record.clockOut2) segments.push([record.clockIn2, record.clockOut2]);
+  let mins = 0;
+  for (const [start, end] of segments) {
+    mins += spanMinutes(start, end);
+    if (record.shift === "break" && spec?.out && spec?.in2) {
+      mins -= overlapMinutes(start, end, spec.out, spec.in2);
+    }
+  }
+  return Math.max(0, Math.round((mins / 60) * 10) / 10);
 }
 
 function overtimeHours(record) {
