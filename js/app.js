@@ -33,6 +33,25 @@ const SHIFTS = {
   },
 };
 
+function breakTimes(emp) {
+  const spec = SHIFTS.break;
+  return {
+    in: emp?.session1In || spec.in,
+    out: emp?.session1Out || spec.out,
+    in2: emp?.session2In || spec.in2,
+    out2: emp?.session2Out || spec.out2,
+  };
+}
+
+function formatClock(time) {
+  if (!time) return "";
+  const [h, m] = String(time).split(":").map(Number);
+  if (!Number.isFinite(h)) return time;
+  const ampm = h >= 12 ? "PM" : "AM";
+  const hr = h % 12 || 12;
+  return m ? `${hr}:${pad(m)} ${ampm}` : `${hr} ${ampm}`;
+}
+
 const appEl = document.getElementById("app");
 const modalEl = document.getElementById("modal");
 
@@ -450,6 +469,10 @@ function normalizeEmployee(emp) {
     mealAllowance: Number(emp.mealAllowance) || 0,
     nightAllowance: Number(emp.nightAllowance) || 0,
     baseSalary: Number(emp.baseSalary) || 0,
+    session1In: emp.session1In || SHIFTS.break.in,
+    session1Out: emp.session1Out || SHIFTS.break.out,
+    session2In: emp.session2In || SHIFTS.break.in2,
+    session2Out: emp.session2Out || SHIFTS.break.out2,
   };
 }
 
@@ -705,30 +728,14 @@ function spanMinutes(start, end) {
   return wrapped;
 }
 
-function overlapMinutes(start, end, gapStart, gapEnd) {
-  const a = timeToMinutes(start);
-  let b = timeToMinutes(end);
-  const g1 = timeToMinutes(gapStart);
-  const g2 = timeToMinutes(gapEnd);
-  if ([a, b, g1, g2].some((n) => n == null)) return 0;
-  if (b <= a) b += 24 * 60;
-  return Math.max(0, Math.min(b, g2) - Math.max(a, g1));
-}
-
 function workedHours(record) {
   if (!["present", "late"].includes(record.status)) return 0;
-  const spec = SHIFTS[record.shift];
   const segments = [];
   if (record.clockIn && record.clockOut) segments.push([record.clockIn, record.clockOut]);
+  if (record.clockIn3 && record.clockOut3) segments.push([record.clockIn3, record.clockOut3]);
   if (record.clockIn2 && record.clockOut2) segments.push([record.clockIn2, record.clockOut2]);
   let mins = 0;
-  for (const [start, end] of segments) {
-    const dur = spanMinutes(start, end);
-    mins += dur;
-    if (dur && record.shift === "break" && spec?.out && spec?.in2) {
-      mins -= overlapMinutes(start, end, spec.out, spec.in2);
-    }
-  }
+  for (const [start, end] of segments) mins += spanMinutes(start, end);
   return Math.max(0, Math.round((mins / 60) * 10) / 10);
 }
 
@@ -738,9 +745,9 @@ function overtimeHours(record) {
 
 function applyWorkRules(rec, opts = {}) {
   if (opts.fromClock) {
-    rec.status = deriveStatus(rec.shift, rec.clockIn, "present");
+    rec.status = deriveStatus(rec.shift, rec.clockIn, "present", rec.employeeId);
   } else if (!["leave", "off", "absent"].includes(rec.status)) {
-    rec.status = deriveStatus(rec.shift, rec.clockIn, rec.status || "present");
+    rec.status = deriveStatus(rec.shift, rec.clockIn, rec.status || "present", rec.employeeId);
   }
   rec.overtimeHours = overtimeHours(rec);
   return rec;
@@ -749,9 +756,9 @@ function applyWorkRules(rec, opts = {}) {
 function formatTimes(rec) {
   if (!rec) return "—";
   const first = rec.clockIn || rec.clockOut ? `${rec.clockIn || "—"}–${rec.clockOut || "—"}` : "";
+  const mid = rec.clockIn3 || rec.clockOut3 ? `${rec.clockIn3 || "—"}–${rec.clockOut3 || "—"}` : "";
   const second = rec.clockIn2 || rec.clockOut2 ? `${rec.clockIn2 || "—"}–${rec.clockOut2 || "—"}` : "";
-  if (first && second) return `${first} · ${second}`;
-  return first || "—";
+  return [first, mid, second].filter(Boolean).join(" · ") || "—";
 }
 
 function nextCode() {
@@ -1131,6 +1138,10 @@ function employeeForm(emp) {
     status: "probation",
     hireDate: todayISO(),
     defaultShift: "morning",
+    session1In: SHIFTS.break.in,
+    session1Out: SHIFTS.break.out,
+    session2In: SHIFTS.break.in2,
+    session2Out: SHIFTS.break.out2,
     baseSalary: 0,
     mealAllowance: 0,
     nightAllowance: 0,
@@ -1165,6 +1176,10 @@ function employeeForm(emp) {
             .map(([k, s]) => `<option value="${k}" ${v.defaultShift === k ? "selected" : ""}>${s.label}</option>`)
             .join("")}</select>
         </label>
+        <label class="field"><span>Break first in</span><input name="session1In" type="time" value="${esc(v.session1In || SHIFTS.break.in)}"></label>
+        <label class="field"><span>Break first out</span><input name="session1Out" type="time" value="${esc(v.session1Out || SHIFTS.break.out)}"></label>
+        <label class="field"><span>Break second in</span><input name="session2In" type="time" value="${esc(v.session2In || SHIFTS.break.in2)}"></label>
+        <label class="field"><span>Break second out</span><input name="session2Out" type="time" value="${esc(v.session2Out || SHIFTS.break.out2)}"></label>
         <label class="field"><span>Base salary (INR)</span><input name="baseSalary" type="number" min="0" step="100" value="${esc(v.baseSalary)}" required></label>
         <label class="field"><span>Meal allowance (INR)</span><input name="mealAllowance" type="number" min="0" step="100" value="${esc(v.mealAllowance)}" required></label>
         <label class="field"><span>Evening allowance (INR)</span><input name="nightAllowance" type="number" min="0" step="100" value="${esc(v.nightAllowance)}" required></label>
@@ -1294,6 +1309,8 @@ function getOrCreateAttendance(employeeId, date) {
       clockOut: "",
       clockIn2: "",
       clockOut2: "",
+      clockIn3: "",
+      clockOut3: "",
       overtimeHours: 0,
       note: "",
     };
@@ -1320,6 +1337,8 @@ function saveAttendance(data, existingId) {
     clockOut: data.clockOut || "",
     clockIn2: data.clockIn2 || "",
     clockOut2: data.clockOut2 || "",
+    clockIn3: data.clockIn3 || "",
+    clockOut3: data.clockOut3 || "",
     note: data.note || "",
     status: data.status || "present",
   });
@@ -1515,7 +1534,7 @@ function attendanceForm(rec, preset = {}) {
   const spec = SHIFTS[shift];
   return `
     <h2>${rec ? "Edit attendance" : "Add attendance"}</h2>
-    <p class="lede">Late after 10:00 AM (morning / break) or 2:00 PM (afternoon). Break shift is 10:00 AM–3:00 PM and 7:00 PM–11:00 PM. Time beyond 9 hours is OT.</p>
+    <p class="lede">Punch the times they actually worked. Break shift is two sessions plus optional call-in OT in the unpaid gap. Hours over 9 are OT.</p>
     <form data-form="save-attendance" data-id="${esc(rec?.id || "")}">
       <div class="form-grid">
         <label class="field"><span>Staff</span>
@@ -1539,10 +1558,12 @@ function attendanceForm(rec, preset = {}) {
             (s) => `<option value="${s}" ${ (rec?.status || "present") === s ? "selected" : ""}>${s}</option>`
           ).join("")}</select>
         </label>
-        <label class="field"><span>Clock in</span><input name="clockIn" type="time" value="${esc(rec?.clockIn || spec?.in || "")}"></label>
-        <label class="field"><span>Clock out</span><input name="clockOut" type="time" value="${esc(rec?.clockOut || spec?.out || "")}"></label>
-        <label class="field"><span>Break second in</span><input name="clockIn2" type="time" value="${esc(rec?.clockIn2 || (shift === "break" ? spec?.in2 : "") || "")}"></label>
-        <label class="field"><span>Break second out</span><input name="clockOut2" type="time" value="${esc(rec?.clockOut2 || (shift === "break" ? spec?.out2 : "") || "")}"></label>
+        <label class="field"><span>First in</span><input name="clockIn" type="time" value="${esc(rec?.clockIn || (shift === "break" ? breakTimes(emp).in : spec?.in) || "")}"></label>
+        <label class="field"><span>First out</span><input name="clockOut" type="time" value="${esc(rec?.clockOut || (shift === "break" ? breakTimes(emp).out : spec?.out) || "")}"></label>
+        <label class="field"><span>Call-in OT in</span><input name="clockIn3" type="time" value="${esc(rec?.clockIn3 || "")}"></label>
+        <label class="field"><span>Call-in OT out</span><input name="clockOut3" type="time" value="${esc(rec?.clockOut3 || "")}"></label>
+        <label class="field"><span>Second in</span><input name="clockIn2" type="time" value="${esc(rec?.clockIn2 || (shift === "break" ? breakTimes(emp).in2 : "") || "")}"></label>
+        <label class="field"><span>Second out</span><input name="clockOut2" type="time" value="${esc(rec?.clockOut2 || (shift === "break" ? breakTimes(emp).out2 : "") || "")}"></label>
         <label class="field wide"><span>Note</span><input name="note" value="${esc(rec?.note || "")}"></label>
       </div>
       <div class="dialog-actions">
@@ -1575,10 +1596,12 @@ function nowTime() {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function deriveStatus(shift, clockIn, chosen) {
+function deriveStatus(shift, clockIn, chosen, employeeId) {
   if (["leave", "off"].includes(chosen) && !clockIn) return chosen;
   if (!clockIn) return chosen === "absent" ? "absent" : chosen || "absent";
-  const limit = SHIFTS[shift]?.lateAfter || SHIFTS[shift]?.in || "10:00";
+  const emp = employeeId ? employeeById(employeeId) : null;
+  const limit =
+    shift === "break" ? breakTimes(emp).in : SHIFTS[shift]?.lateAfter || SHIFTS[shift]?.in || "10:00";
   if (clockIn > limit) return "late";
   return "present";
 }
@@ -1786,10 +1809,12 @@ function renderMyDay() {
       <div class="row-actions">
         ${
           emp.defaultShift === "break"
-            ? `<button class="btn" data-action="clock-in" data-session="1" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">In 10 AM</button>
-               <button class="btn ghost" data-action="clock-out" data-session="1" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Out 3 PM</button>
-               <button class="btn" data-action="clock-in" data-session="2" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">In 7 PM</button>
-               <button class="btn ghost" data-action="clock-out" data-session="2" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Out 11 PM</button>`
+            ? `<button class="btn" data-action="clock-in" data-session="1" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">First in</button>
+               <button class="btn ghost" data-action="clock-out" data-session="1" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">First out</button>
+               <button class="btn" data-action="clock-in" data-session="3" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Call-in OT in</button>
+               <button class="btn ghost" data-action="clock-out" data-session="3" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Call-in OT out</button>
+               <button class="btn" data-action="clock-in" data-session="2" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Second in</button>
+               <button class="btn ghost" data-action="clock-out" data-session="2" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Second out</button>`
             : `<button class="btn" data-action="clock-in" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Clock in</button>
                <button class="btn ghost" data-action="clock-out" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Clock out</button>`
         }
@@ -1815,7 +1840,7 @@ function renderMyDay() {
         </div>
         <p class="hint">${
           emp.defaultShift === "break"
-            ? "Break shift: punch In 10 AM, Out 3 PM, In 7 PM, Out 11 PM. Paid hours are those two sessions only (9h). 3–7 PM is unpaid break and is not OT."
+            ? `Your break shift: ${formatClock(breakTimes(emp).in)}–${formatClock(breakTimes(emp).out)} then ${formatClock(breakTimes(emp).in2)}–${formatClock(breakTimes(emp).out2)}. Punch First in/out and Second in/out at your real times. Gap is unpaid unless you use Call-in OT. Hours over 9 are OT.`
             : "Shifts are 9 hours. Time beyond 9 hours is overtime at 150%. Leave needs owner approval."
         }</p>
       </section>
@@ -2006,6 +2031,10 @@ function upsertEmployee(id, data) {
     status: data.status,
     hireDate: data.hireDate,
     defaultShift: data.defaultShift,
+    session1In: data.session1In || SHIFTS.break.in,
+    session1Out: data.session1Out || SHIFTS.break.out,
+    session2In: data.session2In || SHIFTS.break.in2,
+    session2Out: data.session2Out || SHIFTS.break.out2,
     baseSalary: Number(data.baseSalary) || 0,
     mealAllowance: Number(data.mealAllowance) || 0,
     nightAllowance: Number(data.nightAllowance) || 0,
@@ -2029,6 +2058,8 @@ function applyLeaveToRoster(leave) {
     rec.clockOut = "";
     rec.clockIn2 = "";
     rec.clockOut2 = "";
+    rec.clockIn3 = "";
+    rec.clockOut3 = "";
     rec.overtimeHours = 0;
     rec.note = part.kind === "off" ? "Weekly off" : "Unpaid leave";
   }
@@ -2164,10 +2195,14 @@ document.addEventListener("click", (event) => {
     if (!rec || !canTouchAttendance(rec)) return;
     const t = nowTime();
     if (rec.shift === "break") {
-      const session = target.dataset.session || (t >= "17:00" ? "2" : "1");
+      const times = breakTimes(employeeById(rec.employeeId));
+      const session = target.dataset.session || (t >= times.in2 ? "2" : t >= times.out ? "3" : "1");
       if (session === "2") {
         if (action === "clock-in") rec.clockIn2 = t;
         else rec.clockOut2 = t;
+      } else if (session === "3") {
+        if (action === "clock-in") rec.clockIn3 = t;
+        else rec.clockOut3 = t;
       } else if (action === "clock-in") {
         rec.clockIn = t;
       } else {
