@@ -699,9 +699,10 @@ function spanMinutes(start, end) {
   const a = timeToMinutes(start);
   const b0 = timeToMinutes(end);
   if (a == null || b0 == null) return 0;
-  let b = b0;
-  if (b <= a) b += 24 * 60;
-  return b - a;
+  if (b0 > a) return b0 - a;
+  const wrapped = b0 + 24 * 60 - a;
+  if (wrapped > 12 * 60) return 0;
+  return wrapped;
 }
 
 function overlapMinutes(start, end, gapStart, gapEnd) {
@@ -722,8 +723,9 @@ function workedHours(record) {
   if (record.clockIn2 && record.clockOut2) segments.push([record.clockIn2, record.clockOut2]);
   let mins = 0;
   for (const [start, end] of segments) {
-    mins += spanMinutes(start, end);
-    if (record.shift === "break" && spec?.out && spec?.in2) {
+    const dur = spanMinutes(start, end);
+    mins += dur;
+    if (dur && record.shift === "break" && spec?.out && spec?.in2) {
       mins -= overlapMinutes(start, end, spec.out, spec.in2);
     }
   }
@@ -1418,7 +1420,7 @@ function renderMonthAttendance(people) {
                           const rec = recs.find((a) => a.date === date);
                           if (rec) {
                             return `<td class="cal ${esc(rec.status)}">
-                              <button type="button" class="cal-cell ${esc(rec.status)}" data-action="edit-attendance" data-id="${esc(rec.id)}" title="${esc(emp.name)} · ${esc(date)} · ${esc(rec.status)}">${statusMark(rec.status)}</button>
+                              <button type="button" class="cal-cell ${esc(rec.status)}" data-action="edit-attendance" data-id="${esc(rec.id)}" title="${esc(emp.name)} · ${esc(date)} · ${esc(rec.status)}${overtimeHours(rec) ? ` · OT ${formatHours(overtimeHours(rec))}` : ""}">${statusMark(rec.status)}</button>
                             </td>`;
                           }
                           return `<td class="cal">
@@ -1782,8 +1784,15 @@ function renderMyDay() {
         <p class="lede">${esc(emp.code)} · ${esc(emp.store)} · ${esc(SHIFTS[emp.defaultShift]?.label || "")}</p>
       </div>
       <div class="row-actions">
-        <button class="btn" data-action="clock-in" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Clock in</button>
-        <button class="btn ghost" data-action="clock-out" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Clock out</button>
+        ${
+          emp.defaultShift === "break"
+            ? `<button class="btn" data-action="clock-in" data-session="1" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">In 10 AM</button>
+               <button class="btn ghost" data-action="clock-out" data-session="1" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Out 3 PM</button>
+               <button class="btn" data-action="clock-in" data-session="2" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">In 7 PM</button>
+               <button class="btn ghost" data-action="clock-out" data-session="2" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Out 11 PM</button>`
+            : `<button class="btn" data-action="clock-in" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Clock in</button>
+               <button class="btn ghost" data-action="clock-out" data-id="${esc(rec?.id || "")}" data-employee-id="${esc(emp.id)}">Clock out</button>`
+        }
       </div>
     </div>
     ${
@@ -1794,6 +1803,7 @@ function renderMyDay() {
     <section class="kpis">
       <article class="kpi"><span>Today</span><strong>${rec ? badge(rec.status) : `<span class="badge">not marked</span>`}</strong></article>
       <article class="kpi"><span>In / out</span><strong>${esc(formatTimes(rec))}</strong></article>
+      <article class="kpi"><span>Hours today</span><strong>${rec ? formatHours(workedHours(rec)) : formatHours(0)}</strong></article>
       <article class="kpi"><span>OT today</span><strong>${rec ? formatHours(overtimeHours(rec)) : formatHours(0)}</strong></article>
       <article class="kpi"><span>Est. net · ${esc(ui.payPeriod)}</span><strong>${pending ? "—" : formatInr(pay.net)}</strong></article>
     </section>
@@ -1803,7 +1813,11 @@ function renderMyDay() {
         <div class="row-actions">
           <button class="btn" data-action="apply-leave">Apply for leave</button>
         </div>
-        <p class="hint">Shifts are 9 hours. Time beyond 9 hours is overtime at 150%. Leave needs owner approval.</p>
+        <p class="hint">${
+          emp.defaultShift === "break"
+            ? "Break shift: punch In 10 AM, Out 3 PM, In 7 PM, Out 11 PM. Paid hours are those two sessions only (9h). 3–7 PM is unpaid break and is not OT."
+            : "Shifts are 9 hours. Time beyond 9 hours is overtime at 150%. Leave needs owner approval."
+        }</p>
       </section>
       <section class="panel">
         <h2>My file</h2>
@@ -2149,12 +2163,18 @@ document.addEventListener("click", (event) => {
     if (!rec && target.dataset.employeeId) rec = getOrCreateAttendance(target.dataset.employeeId, todayISO());
     if (!rec || !canTouchAttendance(rec)) return;
     const t = nowTime();
-    if (action === "clock-in") {
-      if (!rec.clockIn) rec.clockIn = t;
-      else if (rec.shift === "break" && rec.clockOut && !rec.clockIn2) rec.clockIn2 = t;
-      else rec.clockIn = t;
-    } else if (rec.shift === "break" && rec.clockIn2) {
-      rec.clockOut2 = t;
+    if (rec.shift === "break") {
+      const session = target.dataset.session || (t >= "17:00" ? "2" : "1");
+      if (session === "2") {
+        if (action === "clock-in") rec.clockIn2 = t;
+        else rec.clockOut2 = t;
+      } else if (action === "clock-in") {
+        rec.clockIn = t;
+      } else {
+        rec.clockOut = t;
+      }
+    } else if (action === "clock-in") {
+      rec.clockIn = t;
     } else {
       rec.clockOut = t;
       if (!rec.clockIn) rec.clockIn = SHIFTS[rec.shift]?.in || t;
