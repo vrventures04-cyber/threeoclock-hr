@@ -775,26 +775,25 @@ function userForEmployee(employeeId) {
   return state.users.find((u) => u.employeeId === employeeId);
 }
 
-function periodBounds(period, fullMonth = false) {
+function periodBounds(period) {
   const [y, m] = period.split("-").map(Number);
   const start = `${y}-${pad(m)}-01`;
   const last = new Date(y, m, 0).getDate();
   const endFull = `${y}-${pad(m)}-${pad(last)}`;
-  if (fullMonth) return { start, end: endFull };
   const today = todayISO();
   return { start, end: endFull < today ? endFull : today };
 }
 
-function attendanceInPeriod(employeeId, period, fullMonth = false) {
-  const { start, end } = periodBounds(period, fullMonth);
+function attendanceInPeriod(employeeId, period) {
+  const { start, end } = periodBounds(period);
   return state.attendance.filter(
     (a) => a.employeeId === employeeId && a.date >= start && a.date <= end
   );
 }
 
-function computePayroll(emp, period, fullMonth = false) {
-  const rows = attendanceInPeriod(emp.id, period, fullMonth);
-  const { start, end } = periodBounds(period, fullMonth);
+function computePayroll(emp, period) {
+  const rows = attendanceInPeriod(emp.id, period);
+  const { start, end } = periodBounds(period);
   const [year, month] = period.split("-").map(Number);
   const monthDays = new Date(year, month, 0).getDate();
   const rollStart = emp.hireDate && emp.hireDate > start ? emp.hireDate : start;
@@ -1734,19 +1733,13 @@ function payrollStaff() {
 
 function bankCreditRows(period) {
   return payrollStaff().map((emp) => {
-    const pay = computePayroll(emp, period, true);
-    const daily = pay.monthDays ? emp.baseSalary / pay.monthDays : 0;
-    const basic = Math.max(0, Number(emp.baseSalary) - pay.absent * daily);
-    const amount = Math.max(
-      0,
-      Math.round(basic + pay.overtimePay + pay.meal + pay.eveningAllow + pay.eveningPay - pay.advance)
-    );
+    const pay = computePayroll(emp, period);
     return {
       name: emp.bankHolder || emp.name,
       account: String(emp.bankAccount || "").replace(/\s+/g, ""),
       ifsc: String(emp.bankIfsc || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
       bank: emp.bankName || "",
-      amount,
+      amount: Math.round(pay.net),
     };
   });
 }
