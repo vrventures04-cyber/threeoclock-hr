@@ -465,6 +465,7 @@ function normalizeEmployee(emp) {
     email: emp.email || "",
     bankName: emp.bankName || "",
     bankAccount: emp.bankAccount || emp.bank || "",
+    bankIfsc: String(emp.bankIfsc || emp.ifsc || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
     bankHolder: emp.bankHolder || emp.name || "",
     mealAllowance: Number(emp.mealAllowance) || 0,
     nightAllowance: Number(emp.nightAllowance) || 0,
@@ -774,25 +775,26 @@ function userForEmployee(employeeId) {
   return state.users.find((u) => u.employeeId === employeeId);
 }
 
-function periodBounds(period) {
+function periodBounds(period, fullMonth = false) {
   const [y, m] = period.split("-").map(Number);
   const start = `${y}-${pad(m)}-01`;
   const last = new Date(y, m, 0).getDate();
-  const today = todayISO();
   const endFull = `${y}-${pad(m)}-${pad(last)}`;
+  if (fullMonth) return { start, end: endFull };
+  const today = todayISO();
   return { start, end: endFull < today ? endFull : today };
 }
 
-function attendanceInPeriod(employeeId, period) {
-  const { start, end } = periodBounds(period);
+function attendanceInPeriod(employeeId, period, fullMonth = false) {
+  const { start, end } = periodBounds(period, fullMonth);
   return state.attendance.filter(
     (a) => a.employeeId === employeeId && a.date >= start && a.date <= end
   );
 }
 
-function computePayroll(emp, period) {
-  const rows = attendanceInPeriod(emp.id, period);
-  const { start, end } = periodBounds(period);
+function computePayroll(emp, period, fullMonth = false) {
+  const rows = attendanceInPeriod(emp.id, period, fullMonth);
+  const { start, end } = periodBounds(period, fullMonth);
   const [year, month] = period.split("-").map(Number);
   const monthDays = new Date(year, month, 0).getDate();
   const rollStart = emp.hireDate && emp.hireDate > start ? emp.hireDate : start;
@@ -1147,6 +1149,7 @@ function employeeForm(emp) {
     nightAllowance: 0,
     bankName: "",
     bankAccount: "",
+    bankIfsc: "",
     bankHolder: "",
   };
   return `
@@ -1185,6 +1188,7 @@ function employeeForm(emp) {
         <label class="field"><span>Evening allowance (INR)</span><input name="nightAllowance" type="number" min="0" step="100" value="${esc(v.nightAllowance)}" required></label>
         <label class="field"><span>Bank name</span><input name="bankName" value="${esc(v.bankName)}"></label>
         <label class="field"><span>Account number</span><input name="bankAccount" value="${esc(v.bankAccount)}"></label>
+        <label class="field"><span>IFSC</span><input name="bankIfsc" value="${esc(v.bankIfsc || "")}" placeholder="e.g. SBIN0001234" maxlength="11"></label>
         <label class="field wide"><span>Account holder</span><input name="bankHolder" value="${esc(v.bankHolder)}"></label>
         <label class="field"><span>Staff username</span><input name="username" value="${esc(login?.username || "")}" placeholder="${isNew ? "optional" : ""}"></label>
         <label class="field"><span>${login ? "Reset password" : "Staff password"}</span><input name="password" type="password" placeholder="${login ? "leave blank to keep" : "optional"}"></label>
@@ -1240,6 +1244,7 @@ function renderEmployeeDetail(id) {
           <div><span>Hire date</span><strong>${esc(emp.hireDate)}</strong></div>
           <div><span>Bank</span><strong>${esc(emp.bankName)}</strong></div>
           <div><span>Account</span><strong>${esc(emp.bankAccount || "—")}</strong></div>
+          <div><span>IFSC</span><strong>${esc(emp.bankIfsc || "—")}</strong></div>
           <div><span>Holder</span><strong>${esc(emp.bankHolder || "—")}</strong></div>
         </div>
       </section>
@@ -1596,6 +1601,333 @@ function nowTime() {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function xmlEsc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[i] = c;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) c = CRC_TABLE[(c ^ bytes[i]) & 255] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function u16(n) {
+  return new Uint8Array([n & 255, (n >>> 8) & 255]);
+}
+
+function u32(n) {
+  return new Uint8Array([n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255]);
+}
+
+function concatBytes(parts) {
+  const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+  let o = 0;
+  for (const part of parts) {
+    out.set(part, o);
+    o += part.length;
+  }
+  return out;
+}
+
+function zipStore(files) {
+  const enc = new TextEncoder();
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = enc.encode(file.name);
+    const data = typeof file.data === "string" ? enc.encode(file.data) : file.data;
+    const crc = crc32(data);
+    const local = concatBytes([
+      enc.encode("PK\x03\x04"),
+      u16(20),
+      u16(0),
+      u16(0),
+      u16(0),
+      u16(0),
+      u32(crc),
+      u32(data.length),
+      u32(data.length),
+      u16(name.length),
+      u16(0),
+      name,
+      data,
+    ]);
+    const central = concatBytes([
+      enc.encode("PK\x01\x02"),
+      u16(20),
+      u16(20),
+      u16(0),
+      u16(0),
+      u16(0),
+      u16(0),
+      u32(crc),
+      u32(data.length),
+      u32(data.length),
+      u16(name.length),
+      u16(0),
+      u16(0),
+      u16(0),
+      u16(0),
+      u32(0),
+      u32(offset),
+      name,
+    ]);
+    locals.push(local);
+    centrals.push(central);
+    offset += local.length;
+  }
+  const central = concatBytes(centrals);
+  const eocd = concatBytes([
+    enc.encode("PK\x05\x06"),
+    u16(0),
+    u16(0),
+    u16(files.length),
+    u16(files.length),
+    u32(central.length),
+    u32(offset),
+    u16(0),
+  ]);
+  return concatBytes([...locals, central, eocd]);
+}
+
+function xlsxCol(n) {
+  return String.fromCharCode(65 + n);
+}
+
+function xlsxText(row, col, text, style) {
+  const ref = `${xlsxCol(col)}${row}`;
+  const s = style != null ? ` s="${style}"` : "";
+  return `<c r="${ref}"${s} t="inlineStr"><is><t xml:space="preserve">${xmlEsc(text)}</t></is></c>`;
+}
+
+function xlsxNum(row, col, num, style) {
+  const ref = `${xlsxCol(col)}${row}`;
+  const s = style != null ? ` s="${style}"` : "";
+  return `<c r="${ref}"${s}><v>${Number(num) || 0}</v></c>`;
+}
+
+function xlsxRow(row, cells) {
+  return `<row r="${row}">${cells.join("")}</row>`;
+}
+
+function payrollStaff() {
+  return state.employees
+    .filter((e) => e.status !== "resigned" && e.status !== "pending")
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function bankCreditRows(period) {
+  return payrollStaff().map((emp) => {
+    const pay = computePayroll(emp, period, true);
+    const daily = pay.monthDays ? emp.baseSalary / pay.monthDays : 0;
+    const basic = Math.max(0, Number(emp.baseSalary) - pay.absent * daily);
+    const amount = Math.max(
+      0,
+      Math.round(basic + pay.overtimePay + pay.meal + pay.eveningAllow + pay.eveningPay - pay.advance)
+    );
+    return {
+      name: emp.bankHolder || emp.name,
+      account: String(emp.bankAccount || "").replace(/\s+/g, ""),
+      ifsc: String(emp.bankIfsc || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
+      bank: emp.bankName || "",
+      amount,
+    };
+  });
+}
+
+function downloadBankCreditSheet(paymentDate, period = ui.payPeriod) {
+  const rows = bankCreditRows(period);
+  const total = rows.reduce((s, r) => s + r.amount, 0);
+  const payLabel = periodLabel(period);
+  const lastData = 6 + rows.length;
+  const sheetRows = [
+    xlsxRow(1, [xlsxText(1, 0, "THREE O'CLOCK", 1)]),
+    xlsxRow(2, [xlsxText(2, 0, "Bhilai · Salary payment advice", 7)]),
+    xlsxRow(3, [xlsxText(3, 0, `Pay period ${payLabel}    Payment date ${paymentDate}    ${rows.length} beneficiaries    Total INR ${total.toLocaleString("en-IN")}`, 7)]),
+    xlsxRow(5, [
+      "Sr No",
+      "Beneficiary name",
+      "Account number",
+      "IFSC",
+      "Bank",
+      "Amount (INR)",
+      "Payment date",
+    ].map((h, i) => xlsxText(5, i, h, 2))),
+    ...rows.map((r, i) => {
+      const row = 6 + i;
+      return xlsxRow(row, [
+        xlsxNum(row, 0, i + 1, 6),
+        xlsxText(row, 1, r.name, 8),
+        xlsxText(row, 2, r.account, 3),
+        xlsxText(row, 3, r.ifsc, 6),
+        xlsxText(row, 4, r.bank, 8),
+        xlsxNum(row, 5, r.amount, 4),
+        xlsxText(row, 6, paymentDate, 6),
+      ]);
+    }),
+    xlsxRow(lastData, [
+      xlsxText(lastData, 1, "Total credit", 5),
+      xlsxNum(lastData, 5, total, 5),
+    ]),
+    xlsxRow(lastData + 2, [
+      xlsxText(lastData + 2, 0, "For NEFT / IMPS salary credit. Amount is monthly salary plus OT, minus unpaid absences and advances.", 7),
+    ]),
+  ];
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>
+  <dimension ref="A1:G${lastData + 2}"/>
+  <sheetViews>
+    <sheetView workbookViewId="0" showGridLines="0">
+      <pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="18"/>
+  <cols>
+    <col min="1" max="1" width="10" customWidth="1"/>
+    <col min="2" max="2" width="28" customWidth="1"/>
+    <col min="3" max="3" width="22" customWidth="1"/>
+    <col min="4" max="4" width="16" customWidth="1"/>
+    <col min="5" max="5" width="22" customWidth="1"/>
+    <col min="6" max="6" width="16" customWidth="1"/>
+    <col min="7" max="7" width="16" customWidth="1"/>
+  </cols>
+  <sheetData>${sheetRows.join("")}</sheetData>
+  <mergeCells count="4">
+    <mergeCell ref="A1:G1"/>
+    <mergeCell ref="A2:G2"/>
+    <mergeCell ref="A3:G3"/>
+    <mergeCell ref="A${lastData + 2}:G${lastData + 2}"/>
+  </mergeCells>
+  <pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.2" footer="0.2"/>
+  <pageSetup orientation="landscape" paperSize="9" fitToWidth="1" fitToHeight="1"/>
+</worksheet>`;
+  const files = [
+    {
+      name: "[Content_Types].xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`,
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`,
+    },
+    {
+      name: "xl/workbook.xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Salary credit" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`,
+    },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`,
+    },
+    {
+      name: "xl/styles.xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="5">
+    <font><sz val="11"/><color theme="1"/><name val="Calibri"/></font>
+    <font><b/><sz val="16"/><color rgb="FF111111"/><name val="Calibri"/></font>
+    <font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><color rgb="FF111111"/><name val="Calibri"/></font>
+    <font><sz val="10"/><color rgb="FF666666"/><name val="Calibri"/></font>
+  </fonts>
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF111111"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border>
+      <left style="thin"><color rgb="FFDDDDDD"/></left>
+      <right style="thin"><color rgb="FFDDDDDD"/></right>
+      <top style="thin"><color rgb="FFDDDDDD"/></top>
+      <bottom style="thin"><color rgb="FFDDDDDD"/></bottom>
+      <diagonal/>
+    </border>
+  </borders>
+  <cellXfs count="9">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyFont="1"><alignment horizontal="left" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="2" fillId="2" borderId="1" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="49" fontId="0" fillId="0" borderId="1" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>
+    <xf numFmtId="3" fontId="0" fillId="0" borderId="1" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>
+    <xf numFmtId="3" fontId="3" fillId="0" borderId="1" applyFont="1" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>
+    <xf numFmtId="49" fontId="0" fillId="0" borderId="1" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="4" fillId="0" borderId="0" applyFont="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>
+  </cellXfs>
+</styleSheet>`,
+    },
+    { name: "xl/worksheets/sheet1.xml", data: sheet },
+  ];
+  const blob = new Blob([zipStore(files)], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `THREE-OCLOCK-salary-credit-${period}-${paymentDate}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function openBankCreditModal() {
+  if (!isOwner()) return;
+  const missingAcc = payrollStaff().filter((e) => !String(e.bankAccount || "").trim()).length;
+  const missingIfsc = payrollStaff().filter((e) => !String(e.bankIfsc || "").trim()).length;
+  openModal(`
+    <h2>Bank salary credit</h2>
+    <p class="lede">Excel for ${esc(periodLabel(ui.payPeriod))}: beneficiary name, account, IFSC, bank, amount, payment date. Amount is monthly salary plus OT, minus unpaid days and advances.</p>
+    ${
+      missingAcc || missingIfsc
+        ? `<p class="notice">${missingAcc ? `${missingAcc} missing account number. ` : ""}${missingIfsc ? `${missingIfsc} missing IFSC. ` : ""}Add these under People before sending to the bank.</p>`
+        : ""
+    }
+    <form data-form="bank-credit">
+      <div class="form-grid">
+        <label class="field"><span>Payment date</span><input name="paymentDate" type="date" value="${esc(todayISO())}" required></label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
+        <button class="btn" type="submit">Download Excel</button>
+      </div>
+    </form>`);
+}
+
 function deriveStatus(shift, clockIn, chosen, employeeId) {
   if (["leave", "off"].includes(chosen) && !clockIn) return chosen;
   if (!clockIn) return chosen === "absent" ? "absent" : chosen || "absent";
@@ -1619,6 +1951,7 @@ function renderPayroll() {
         <h1>Payroll</h1>
         <p class="lede">Owner-only. Amounts in INR. Basic is the monthly salary on the employee file. One weekday off a week is paid weekly off; extra weekday leave is unpaid.</p>
       </div>
+      <button class="btn" data-action="bank-credit">Bank credit Excel</button>
     </div>
     ${
       people.some((e) => !Number(e.baseSalary))
@@ -1634,6 +1967,7 @@ function renderPayroll() {
     <section class="panel">
       <div class="toolbar">
         <input type="month" data-bind="payPeriod" value="${esc(ui.payPeriod)}" />
+        <button class="btn ghost" type="button" data-action="bank-credit">Download bank sheet</button>
       </div>
       <div class="table-wrap">
         <table>
@@ -2040,6 +2374,7 @@ function upsertEmployee(id, data) {
     nightAllowance: Number(data.nightAllowance) || 0,
     bankName: data.bankName,
     bankAccount: data.bankAccount,
+    bankIfsc: String(data.bankIfsc || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
     bankHolder: data.bankHolder || data.name,
   };
   if (id) state.employees = state.employees.map((e) => (e.id === id ? { ...prev, ...record, id } : e));
@@ -2242,6 +2577,11 @@ document.addEventListener("click", (event) => {
     render();
     return;
   }
+  if (action === "bank-credit") {
+    if (!isOwner()) return;
+    openBankCreditModal();
+    return;
+  }
   if (action === "payslip") {
     renderPayslip(id);
     return;
@@ -2370,6 +2710,15 @@ document.addEventListener("submit", (event) => {
     });
     persist();
     renderPayslip(employeeId);
+    return;
+  }
+
+  if (kind === "bank-credit") {
+    if (!isOwner()) return;
+    const paymentDate = data.paymentDate || todayISO();
+    downloadBankCreditSheet(paymentDate, ui.payPeriod);
+    closeModal();
+    showSaveNotice("Bank credit Excel downloaded.", false);
     return;
   }
 
