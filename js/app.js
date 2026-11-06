@@ -210,12 +210,6 @@ function ymd(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function addDays(date, n) {
-  const d = new Date(`${date}T00:00:00`);
-  d.setDate(d.getDate() + n);
-  return ymd(d);
-}
-
 function isLeaveBlockedDate(date) {
   return LEAVE_BLOCKED_WEEKDAYS.includes(weekdayOf(date));
 }
@@ -226,13 +220,6 @@ function blockedLeaveDates(from, to) {
 
 function eligibleLeaveDates(from, to) {
   return dateRange(from, to).filter((date) => !isLeaveBlockedDate(date));
-}
-
-function weekStartMonday(date) {
-  const d = new Date(`${date}T00:00:00`);
-  const day = d.getDay();
-  d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day));
-  return ymd(d);
 }
 
 function dateRange(from, to) {
@@ -246,33 +233,67 @@ function dateRange(from, to) {
   return dates;
 }
 
-function weekOffCount(employeeId, weekStart, exceptLeaveId) {
-  const dates = new Set(dateRange(weekStart, addDays(weekStart, 6)));
+function monthSpan(period) {
+  const [y, m] = String(period).split("-").map(Number);
+  const start = `${y}-${pad(m)}-01`;
+  const last = new Date(y, m, 0).getDate();
+  return { start, end: `${y}-${pad(m)}-${pad(last)}`, monthDays: last };
+}
+
+function weeklyOffEntitledInMonth(emp, period) {
+  const { start, end, monthDays } = monthSpan(period);
+  const rollStart = emp?.hireDate && emp.hireDate > start ? emp.hireDate : start;
+  if (!monthDays || rollStart > end) return 0;
+  const onRollDays = dateRange(rollStart, end).length;
+  return Math.max(0, Math.round(WEEKLY_OFFS_PER_MONTH * (onRollDays / monthDays)));
+}
+
+function paidOffDatesInMonth(employeeId, period, opts = {}) {
+  const { start, end } = monthSpan(period);
   const counted = new Set();
   for (const rec of state.attendance || []) {
-    if (rec.employeeId === employeeId && dates.has(rec.date) && rec.status === "off") counted.add(rec.date);
+    if (rec.employeeId !== employeeId || rec.id === opts.exceptAttendanceId) continue;
+    if (rec.date < start || rec.date > end || rec.status !== "off") continue;
+    counted.add(rec.date);
   }
   for (const leave of state.leaves || []) {
-    if (leave.employeeId !== employeeId || leave.id === exceptLeaveId || leave.status === "rejected") continue;
-    const parts = leave.days || [];
-    for (const part of parts) {
-      if (part.kind === "off" && dates.has(part.date)) counted.add(part.date);
+    if (leave.employeeId !== employeeId || leave.id === opts.exceptLeaveId || leave.status === "rejected") continue;
+    for (const part of leave.days || []) {
+      if (part.kind === "off" && part.date >= start && part.date <= end) counted.add(part.date);
     }
   }
-  return counted.size;
+  return counted;
 }
 
 function classifyLeaveDays(employeeId, from, to, exceptLeaveId) {
   const extraOff = {};
+  const emp = employeeById(employeeId);
   return eligibleLeaveDates(from, to).map((date) => {
-    const week = weekStartMonday(date);
-    const used = weekOffCount(employeeId, week, exceptLeaveId) + (extraOff[week] || 0);
-    if (used < 1) {
-      extraOff[week] = (extraOff[week] || 0) + 1;
+    const period = date.slice(0, 7);
+    const entitled = weeklyOffEntitledInMonth(emp, period);
+    const used = paidOffDatesInMonth(employeeId, period, { exceptLeaveId }).size + (extraOff[period] || 0);
+    if (used < entitled) {
+      extraOff[period] = (extraOff[period] || 0) + 1;
       return { date, kind: "off" };
     }
     return { date, kind: "unpaid" };
   });
+}
+
+function applyMonthlyOffCap(payload, existingId) {
+  if (!["leave", "off"].includes(payload.status)) return payload;
+  const emp = employeeById(payload.employeeId);
+  const period = String(payload.date || "").slice(0, 7);
+  if (!emp || !period) return payload;
+  const entitled = weeklyOffEntitledInMonth(emp, period);
+  const used = paidOffDatesInMonth(payload.employeeId, period, { exceptAttendanceId: existingId });
+  used.delete(payload.date);
+  const paid = used.size < entitled;
+  payload.status = paid ? "off" : "absent";
+  if (!payload.note || payload.note === "Weekly off" || payload.note === "Unpaid leave") {
+    payload.note = paid ? "Weekly off" : "Unpaid leave";
+  }
+  return payload;
 }
 
 function leaveKindLabel(leave) {
@@ -1341,19 +1362,22 @@ function saveAttendance(data, existingId) {
   const emp = employeeById(employeeId);
   if (!emp) throw new Error("Choose a staff member.");
   if (!date) throw new Error("Choose a date.");
-  const payload = applyWorkRules({
-    employeeId,
-    date,
-    shift: data.shift || emp.defaultShift || "morning",
-    clockIn: data.clockIn || "",
-    clockOut: data.clockOut || "",
-    clockIn2: data.clockIn2 || "",
-    clockOut2: data.clockOut2 || "",
-    clockIn3: data.clockIn3 || "",
-    clockOut3: data.clockOut3 || "",
-    note: data.note || "",
-    status: data.status || "present",
-  });
+  const payload = applyMonthlyOffCap(
+    applyWorkRules({
+      employeeId,
+      date,
+      shift: data.shift || emp.defaultShift || "morning",
+      clockIn: data.clockIn || "",
+      clockOut: data.clockOut || "",
+      clockIn2: data.clockIn2 || "",
+      clockOut2: data.clockOut2 || "",
+      clockIn3: data.clockIn3 || "",
+      clockOut3: data.clockOut3 || "",
+      note: data.note || "",
+      status: data.status || "present",
+    }),
+    existingId
+  );
   const existing = existingId ? state.attendance.find((a) => a.id === existingId) : null;
   const clash = state.attendance.find(
     (a) => a.employeeId === employeeId && a.date === date && (!existing || a.id !== existing.id)
@@ -1589,7 +1613,7 @@ function attendanceForm(rec, preset = {}) {
 function leaveForm(employeeId) {
   return `
     <h2>Apply for leave</h2>
-    <p class="lede">Monday to Thursday only. The first weekday off in a week is weekly off (paid). Extra weekday days that week are unpaid. Friday–Sunday cannot be selected.</p>
+    <p class="lede">Monday to Thursday only. Up to 4 weekly offs in a month are paid, even if taken on consecutive days. Any further leave that month is unpaid. Friday–Sunday cannot be selected.</p>
     <form data-form="apply-leave" data-id="${esc(employeeId)}">
       <div class="form-grid">
         <label class="field"><span>From</span><input name="from" type="date" value="${esc(todayISO())}" required></label>
@@ -1950,7 +1974,7 @@ function renderPayroll() {
     <div class="page-head">
       <div>
         <h1>Payroll</h1>
-        <p class="lede">Owner-only. Amounts in INR. Basic is the monthly salary on the employee file. One weekday off a week is paid weekly off; unused weekly offs are paid extra (that day’s base pay). Extra weekday leave is unpaid. Hours over 9 are OT.</p>
+        <p class="lede">Owner-only. Amounts in INR. Basic is the monthly salary on the employee file. Up to 4 weekly offs a month are paid, including 4 days in a row. Unused weekly offs are paid extra (that day’s base pay). Any further leave that month is unpaid. Hours over 9 are OT.</p>
       </div>
       <button class="btn" data-action="bank-credit">Bank credit Excel</button>
     </div>
@@ -2081,7 +2105,7 @@ function renderOwnerLeave() {
     <div class="page-head">
       <div>
         <h1>Leave</h1>
-        <p class="lede">Approve or reject. First weekday in a week is weekly off; extra weekday days are unpaid. Friday–Sunday are not allowed.</p>
+        <p class="lede">Approve or reject. Up to 4 weekly offs a month are paid, even consecutive. Any further leave that month is unpaid. Friday–Sunday are not allowed.</p>
       </div>
     </div>
     <section class="panel">
@@ -2241,7 +2265,7 @@ function renderMyLeave() {
     <div class="page-head">
       <div>
         <h1>My leave</h1>
-        <p class="lede">Monday–Thursday only. One weekday off a week is weekly off; extra days that week are unpaid.</p>
+        <p class="lede">Monday–Thursday only. Up to 4 weekly offs a month are paid, even consecutive. Extra days that month are unpaid.</p>
       </div>
       <button class="btn" data-action="apply-leave">Apply for leave</button>
     </div>
