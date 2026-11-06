@@ -810,12 +810,17 @@ function computePayroll(emp, period) {
   const eveningHours = eveningRows.reduce((s, r) => s + workedHours(r), 0);
   const daily = monthDays ? emp.baseSalary / monthDays : 0;
   const hourly = daily / STANDARD_HOURS;
+  const weeklyOffEntitled = monthDays
+    ? Math.max(0, Math.round(WEEKLY_OFFS_PER_MONTH * (onRollDays / monthDays)))
+    : 0;
+  const unusedWeeklyOffs = Math.max(0, weeklyOffEntitled - weeklyOff);
+  const weeklyOffWorkPay = unusedWeeklyOffs * daily;
   const basicPay = monthDays ? emp.baseSalary * (payableDays / monthDays) : 0;
   const overtimePay = otHours * hourly * 1.5;
   const eveningPay = eveningHours * hourly * 0.3;
   const meal = monthDays ? emp.mealAllowance * (present / monthDays) : 0;
   const eveningAllow = monthDays ? emp.nightAllowance * (eveningRows.length / monthDays) : 0;
-  const gross = basicPay + overtimePay + eveningPay + meal + eveningAllow;
+  const gross = basicPay + weeklyOffWorkPay + overtimePay + eveningPay + meal + eveningAllow;
   const advance = advanceTotal(emp.id, period);
   const net = Math.max(0, gross - advance);
   return {
@@ -823,12 +828,15 @@ function computePayroll(emp, period) {
     payableDays,
     monthDays,
     monthlyBase: emp.baseSalary,
+    dailyRate: daily,
     present,
     absent,
     late,
     leave,
     weeklyOff,
-    weeklyOffEntitled: WEEKLY_OFFS_PER_MONTH,
+    weeklyOffEntitled,
+    unusedWeeklyOffs,
+    weeklyOffWorkPay,
     overtimeHours: otHours,
     eveningHours,
     basicPay,
@@ -1779,7 +1787,7 @@ function downloadBankCreditSheet(paymentDate, period = ui.payPeriod) {
       xlsxNum(lastData, 5, total, 5),
     ]),
     xlsxRow(lastData + 2, [
-      xlsxText(lastData + 2, 0, "For NEFT / IMPS salary credit. Amount is monthly salary plus OT, minus unpaid absences and advances.", 7),
+      xlsxText(lastData + 2, 0, "For NEFT / IMPS salary credit. Amount is monthly salary plus unused weekly-off extra and OT, minus unpaid absences and advances.", 7),
     ]),
   ];
   const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1904,7 +1912,7 @@ function openBankCreditModal() {
   const missingIfsc = payrollStaff().filter((e) => !String(e.bankIfsc || "").trim()).length;
   openModal(`
     <h2>Bank salary credit</h2>
-    <p class="lede">Excel for ${esc(periodLabel(ui.payPeriod))}: beneficiary name, account, IFSC, bank, amount, payment date. Amount is monthly salary plus OT, minus unpaid days and advances.</p>
+    <p class="lede">Excel for ${esc(periodLabel(ui.payPeriod))}: beneficiary name, account, IFSC, bank, amount, payment date. Amount matches Payroll net (including unused weekly-off extra and OT, minus unpaid days and advances).</p>
     ${
       missingAcc || missingIfsc
         ? `<p class="notice">${missingAcc ? `${missingAcc} missing account number. ` : ""}${missingIfsc ? `${missingIfsc} missing IFSC. ` : ""}Add these under People before sending to the bank.</p>`
@@ -1942,7 +1950,7 @@ function renderPayroll() {
     <div class="page-head">
       <div>
         <h1>Payroll</h1>
-        <p class="lede">Owner-only. Amounts in INR. Basic is the monthly salary on the employee file. One weekday off a week is paid weekly off; extra weekday leave is unpaid.</p>
+        <p class="lede">Owner-only. Amounts in INR. Basic is the monthly salary on the employee file. One weekday off a week is paid weekly off; unused weekly offs are paid extra (that day’s base pay). Extra weekday leave is unpaid. Hours over 9 are OT.</p>
       </div>
       <button class="btn" data-action="bank-credit">Bank credit Excel</button>
     </div>
@@ -2015,7 +2023,8 @@ function renderPayslip(id) {
         <div><span>Paid days (present + late + weekly offs)</span><strong>${pay.paid}</strong></div>
         <div><span>Present / late / unpaid absent</span><strong>${pay.present} / ${pay.late} / ${pay.absent}</strong></div>
         <div><span>Paid leave</span><strong>${pay.leave}</strong></div>
-        <div><span>Weekly offs (entitled ${pay.weeklyOffEntitled}/month)</span><strong>${pay.weeklyOff}</strong></div>
+        <div><span>Weekly offs taken (entitled ${pay.weeklyOffEntitled})</span><strong>${pay.weeklyOff}</strong></div>
+        <div><span>Unused weekly offs paid extra (${pay.unusedWeeklyOffs} × ${formatInr(pay.dailyRate)})</span><strong>${formatInr(pay.weeklyOffWorkPay)}</strong></div>
         <div><span>Basic salary</span><strong>${formatInr(pay.basicPay)}</strong></div>
         <div><span>Overtime (hours over 9) ${formatHours(pay.overtimeHours)} × 150%</span><strong>${formatInr(pay.overtimePay)}</strong></div>
         <div><span>Evening premium ${formatHours(pay.eveningHours)} × 30%</span><strong>${formatInr(pay.eveningPay)}</strong></div>
@@ -2283,6 +2292,7 @@ function renderMyPay() {
       }
       <div class="line-list">
         <div><span>Paid days</span><strong>${pay.paid}</strong></div>
+        <div><span>Unused weekly offs extra</span><strong>${pay.unusedWeeklyOffs} days · ${formatInr(pay.weeklyOffWorkPay)}</strong></div>
         <div><span>Overtime</span><strong>${formatHours(pay.overtimeHours)} · ${formatInr(pay.overtimePay)}</strong></div>
         <div><span>Gross</span><strong>${formatInr(pay.gross)}</strong></div>
         <div><span>Advance deducted</span><strong>− ${formatInr(pay.advance)}</strong></div>
