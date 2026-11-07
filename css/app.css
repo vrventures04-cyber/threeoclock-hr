@@ -274,7 +274,8 @@ textarea:focus {
 }
 
 .badge.pending,
-.badge.rejected {
+.badge.rejected,
+.badge.cancelled {
   color: var(--warn);
   border-color: #e3c0c0;
   background: #fbf1f1;

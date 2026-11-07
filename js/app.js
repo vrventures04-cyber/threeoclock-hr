@@ -249,20 +249,35 @@ function weeklyOffEntitledInMonth(emp, period) {
   return Math.max(0, Math.round(WEEKLY_OFFS_PER_MONTH * (onRollDays / monthDays)));
 }
 
+function attendanceWasWorked(rec) {
+  if (!rec) return false;
+  if (["present", "late"].includes(rec.status)) return true;
+  return workSegments(rec).length > 0;
+}
+
 function paidOffDatesInMonth(employeeId, period, opts = {}) {
   const { start, end } = monthSpan(period);
   const counted = new Set();
+  const worked = new Set();
   for (const rec of state.attendance || []) {
     if (rec.employeeId !== employeeId || rec.id === opts.exceptAttendanceId) continue;
-    if (rec.date < start || rec.date > end || rec.status !== "off") continue;
-    counted.add(rec.date);
+    if (rec.date < start || rec.date > end) continue;
+    if (attendanceWasWorked(rec)) worked.add(rec.date);
+    else if (rec.status === "off") counted.add(rec.date);
   }
   for (const leave of state.leaves || []) {
-    if (leave.employeeId !== employeeId || leave.id === opts.exceptLeaveId || leave.status === "rejected") continue;
+    if (
+      leave.employeeId !== employeeId ||
+      leave.id === opts.exceptLeaveId ||
+      leave.status === "rejected" ||
+      leave.status === "cancelled"
+    )
+      continue;
     for (const part of leave.days || []) {
-      if (part.kind === "off" && part.date >= start && part.date <= end) counted.add(part.date);
+      if (part.kind === "off" && part.date >= start && part.date <= end && !worked.has(part.date)) counted.add(part.date);
     }
   }
+  for (const date of worked) counted.delete(date);
   return counted;
 }
 
@@ -520,7 +535,7 @@ function reclassifyLeavePool(data) {
   state = data;
   try {
     const leaves = (data.leaves || [])
-      .filter((l) => l.status && l.status !== "rejected")
+      .filter((l) => l.status && l.status !== "rejected" && l.status !== "cancelled")
       .sort((a, b) => String(a.from || "").localeCompare(String(b.from || "")));
     for (const leave of leaves) {
       const days = classifyLeaveDays(leave.employeeId, leave.from, leave.to, leave.id);
@@ -2198,13 +2213,13 @@ function renderOwnerLeave() {
     <div class="page-head">
       <div>
         <h1>Leave</h1>
-        <p class="lede">Approve or reject. Up to 4 weekly offs a month are paid, even consecutive. Any further leave that month is unpaid. Friday–Sunday are not allowed.</p>
+        <p class="lede">Approve, reject, or cancel. Payroll follows punches: if they worked the day, it is not treated as leave. Cancel a mistaken demo or wrong approval — the request stays on file as cancelled. Friday–Sunday are not allowed.</p>
       </div>
     </div>
     <section class="panel">
       <div class="toolbar">
         <select data-bind="leaveFilter">
-          ${["pending", "approved", "rejected", "all"]
+          ${["pending", "approved", "rejected", "cancelled", "all"]
             .map((s) => `<option value="${s}" ${ui.leaveFilter === s ? "selected" : ""}>${s}</option>`)
             .join("")}
         </select>
@@ -2229,6 +2244,11 @@ function renderOwnerLeave() {
                             ? `<div class="row-actions">
                                 <button class="btn small" data-action="leave-approve" data-id="${esc(l.id)}">Approve</button>
                                 <button class="btn small ghost" data-action="leave-reject" data-id="${esc(l.id)}">Reject</button>
+                                <button class="btn small ghost" data-action="leave-cancel" data-id="${esc(l.id)}">Cancel</button>
+                              </div>`
+                            : l.status === "approved"
+                              ? `<div class="row-actions">
+                                <button class="btn small ghost" data-action="leave-cancel" data-id="${esc(l.id)}">Cancel</button>
                               </div>`
                             : ""
                         }</td>
@@ -2365,7 +2385,7 @@ function renderMyLeave() {
     <section class="panel">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Type</th><th>From</th><th>To</th><th>Reason</th><th>Status</th></tr></thead>
+          <thead><tr><th>Type</th><th>From</th><th>To</th><th>Reason</th><th>Status</th><th></th></tr></thead>
           <tbody>
             ${
               rows.length
@@ -2374,10 +2394,15 @@ function renderMyLeave() {
                       (l) => `<tr>
                         <td>${esc(leaveKindLabel(l))}</td><td>${esc(l.from)}</td><td>${esc(l.to)}</td>
                         <td>${esc(l.reason)}</td><td>${badge(l.status)}</td>
+                        <td>${
+                          l.status === "pending"
+                            ? `<button class="btn small ghost" data-action="leave-withdraw" data-id="${esc(l.id)}">Withdraw</button>`
+                            : ""
+                        }</td>
                       </tr>`
                     )
                     .join("")
-                : `<tr><td colspan="5" class="empty">No leave requests yet.</td></tr>`
+                : `<tr><td colspan="6" class="empty">No leave requests yet.</td></tr>`
             }
           </tbody>
         </table>
@@ -2527,6 +2552,30 @@ function decideLeave(id, status) {
   if (!leave || leave.status !== "pending") return;
   leave.status = status;
   if (status === "approved") applyLeaveToRoster(leave);
+  persist();
+}
+
+function revertLeaveFromRoster(leave) {
+  for (const part of leave.days || []) {
+    const rec = state.attendance.find((a) => a.employeeId === leave.employeeId && a.date === part.date);
+    if (!rec || attendanceWasWorked(rec)) continue;
+    if (rec.status === "off" || rec.status === "absent") {
+      state.attendance = state.attendance.filter((a) => a.id !== rec.id);
+    }
+  }
+}
+
+function cancelLeave(id, asStaff = false) {
+  const leave = state.leaves.find((l) => l.id === id);
+  if (!leave || leave.status === "rejected" || leave.status === "cancelled") return;
+  if (asStaff) {
+    if (leave.employeeId !== currentUser()?.employeeId || leave.status !== "pending") return;
+  } else if (!isOwner()) return;
+  else if (leave.status !== "pending" && leave.status !== "approved") return;
+  const wasApproved = leave.status === "approved";
+  leave.status = "cancelled";
+  leave.cancelledAt = todayISO();
+  if (wasApproved) revertLeaveFromRoster(leave);
   persist();
 }
 
@@ -2728,6 +2777,17 @@ document.addEventListener("click", (event) => {
   }
   if (action === "leave-reject") {
     decideLeave(id, "rejected");
+    render();
+    return;
+  }
+  if (action === "leave-cancel") {
+    if (!isOwner()) return;
+    cancelLeave(id, false);
+    render();
+    return;
+  }
+  if (action === "leave-withdraw") {
+    cancelLeave(id, true);
     render();
   }
 });
