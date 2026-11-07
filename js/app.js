@@ -511,7 +511,7 @@ function applyPayRulesToAttendance(data) {
     }
     rec.overtimeHours = overtimeHours(rec);
   }
-  data.payRulesV21 = true;
+  data.payRulesV22 = true;
   return data;
 }
 
@@ -642,7 +642,7 @@ function mergeStates(server, local) {
   next.attendance = mergeAttendance(next.attendance, mine.attendance);
   next.kajalSeeded = Boolean(next.kajalSeeded || mine.kajalSeeded);
   next.octoberStaffSeeded = Boolean(next.octoberStaffSeeded || mine.octoberStaffSeeded);
-  next.payRulesV21 = Boolean(next.payRulesV21 || mine.payRulesV21);
+  next.payRulesV22 = Boolean(next.payRulesV22 || mine.payRulesV22);
   return next;
 }
 
@@ -669,7 +669,7 @@ async function refreshState() {
   state = hydrateState(payload.state || defaultState());
   markAttendanceSynced();
   lastRefreshAt = Date.now();
-  if (!flags.kajalSeeded || !flags.octoberStaffSeeded || !flags.payRulesV21) {
+  if (!flags.kajalSeeded || !flags.octoberStaffSeeded || !flags.payRulesV22) {
     await flushPersist();
   }
   return state;
@@ -899,7 +899,12 @@ function computePayroll(emp, period) {
     : 0;
   const unusedWeeklyOffs = Math.max(0, weeklyOffEntitled - weeklyOff);
   const weeklyOffWorkPay = unusedWeeklyOffs * daily;
-  const basicPay = monthDays ? emp.baseSalary * (payableDays / monthDays) : 0;
+  const shortHours = rows.reduce((s, r) => {
+    if (!["present", "late"].includes(r.status) || !workSegments(r).length) return s;
+    return s + Math.max(0, STANDARD_HOURS - workedHours(r));
+  }, 0);
+  const shortPay = shortHours * hourly;
+  const basicPay = Math.max(0, (monthDays ? emp.baseSalary * (payableDays / monthDays) : 0) - shortPay);
   const overtimePay = otHours * hourly * 1.5;
   const eveningPay = eveningHours * hourly * 0.3;
   const meal = monthDays ? emp.mealAllowance * (present / monthDays) : 0;
@@ -921,6 +926,8 @@ function computePayroll(emp, period) {
     weeklyOffEntitled,
     unusedWeeklyOffs,
     weeklyOffWorkPay,
+    shortHours,
+    shortPay,
     overtimeHours: otHours,
     eveningHours,
     basicPay,
@@ -2036,7 +2043,7 @@ function renderPayroll() {
     <div class="page-head">
       <div>
         <h1>Payroll</h1>
-        <p class="lede">Owner-only. Amounts in INR. Basic is the monthly salary on the employee file. Up to 4 weekly offs a month are paid, including 4 days in a row. Unused weekly offs are paid extra (that day’s base pay). Any further leave that month is unpaid. Hours over 9 are OT.</p>
+        <p class="lede">Owner-only. Amounts in INR. Basic is the monthly salary on the employee file. A day under 9 hours is paid pro rata by the hour. Up to 4 weekly offs a month are paid, including 4 days in a row. Unused weekly offs are paid extra (that day’s base pay). Any further leave that month is unpaid. Hours over 9 until 11:30 PM are OT.</p>
       </div>
       <button class="btn" data-action="bank-credit">Bank credit Excel</button>
     </div>
@@ -2111,7 +2118,8 @@ function renderPayslip(id) {
         <div><span>Paid leave</span><strong>${pay.leave}</strong></div>
         <div><span>Weekly offs taken (entitled ${pay.weeklyOffEntitled})</span><strong>${pay.weeklyOff}</strong></div>
         <div><span>Unused weekly offs paid extra (${pay.unusedWeeklyOffs} × ${formatInr(pay.dailyRate)})</span><strong>${formatInr(pay.weeklyOffWorkPay)}</strong></div>
-        <div><span>Basic salary</span><strong>${formatInr(pay.basicPay)}</strong></div>
+        <div><span>Basic salary</span><strong>${formatInr(pay.basicPay + pay.shortPay)}</strong></div>
+        <div><span>Short hours (under 9) ${formatHours(pay.shortHours)} × hourly</span><strong>− ${formatInr(pay.shortPay)}</strong></div>
         <div><span>Overtime (hours over 9, until 11:30 PM) ${formatHours(pay.overtimeHours)} × 150%</span><strong>${formatInr(pay.overtimePay)}</strong></div>
         <div><span>Evening premium ${formatHours(pay.eveningHours)} × 30%</span><strong>${formatInr(pay.eveningPay)}</strong></div>
         <div><span>Meal allowance</span><strong>${formatInr(pay.meal)}</strong></div>
@@ -2379,6 +2387,7 @@ function renderMyPay() {
       <div class="line-list">
         <div><span>Paid days</span><strong>${pay.paid}</strong></div>
         <div><span>Unused weekly offs extra</span><strong>${pay.unusedWeeklyOffs} days · ${formatInr(pay.weeklyOffWorkPay)}</strong></div>
+        <div><span>Short hours under 9</span><strong>${formatHours(pay.shortHours)} · − ${formatInr(pay.shortPay)}</strong></div>
         <div><span>Overtime</span><strong>${formatHours(pay.overtimeHours)} · ${formatInr(pay.overtimePay)}</strong></div>
         <div><span>Gross</span><strong>${formatInr(pay.gross)}</strong></div>
         <div><span>Advance deducted</span><strong>− ${formatInr(pay.advance)}</strong></div>
