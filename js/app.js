@@ -1880,7 +1880,7 @@ function downloadBankCreditSheet(paymentDate, period = ui.payPeriod) {
       xlsxNum(lastData, 5, total, 5),
     ]),
     xlsxRow(lastData + 2, [
-      xlsxText(lastData + 2, 0, "For NEFT / IMPS salary credit. Amount is monthly salary plus unused weekly-off extra and OT, minus unpaid absences and advances.", 7),
+      xlsxText(lastData + 2, 0, "For NEFT / IMPS salary credit. Amount matches Payroll net, including pro-rata short days, unused weekly-off extra and OT, minus unpaid absences and advances.", 7),
     ]),
   ];
   const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
