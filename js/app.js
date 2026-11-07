@@ -2,6 +2,7 @@ const STORAGE_KEY = "toc-hr-v3";
 const SESSION_KEY = "toc-hr-session";
 const STANDARD_HOURS = 9;
 const SHIFT_HOURS = 9;
+const OT_CUTOFF = "23:00";
 const WEEKLY_OFFS_PER_MONTH = 4;
 const LEAVE_BLOCKED_WEEKDAYS = [0, 5, 6];
 const OWNER_PASSWORD = "3oclock";
@@ -498,6 +499,22 @@ function normalizeEmployee(emp) {
   };
 }
 
+function applyPayRulesToAttendance(data) {
+  const byId = new Map((data.employees || []).map((e) => [e.id, e]));
+  for (const rec of data.attendance || []) {
+    const emp = byId.get(rec.employeeId);
+    applyRotatingShift(rec, emp);
+    if (["present", "late"].includes(rec.status) && rec.clockIn) {
+      const limit =
+        rec.shift === "break" ? breakTimes(emp).in : SHIFTS[rec.shift]?.lateAfter || SHIFTS[rec.shift]?.in || "10:00";
+      rec.status = rec.clockIn > limit ? "late" : "present";
+    }
+    rec.overtimeHours = overtimeHours(rec);
+  }
+  data.payRulesV20 = true;
+  return data;
+}
+
 function hydrateState(parsed) {
   parsed.employees = (parsed.employees || []).map(normalizeEmployee);
   parsed.leaves = parsed.leaves || [];
@@ -508,6 +525,7 @@ function hydrateState(parsed) {
   if (!parsed.users.some((u) => u.role === "owner")) parsed.users = [...ownerAccounts(), ...parsed.users];
   if (!parsed.kajalSeeded) ensureKajal(parsed);
   if (!parsed.octoberStaffSeeded) ensureOctoberStaff(parsed);
+  applyPayRulesToAttendance(parsed);
   return parsed;
 }
 
@@ -624,6 +642,7 @@ function mergeStates(server, local) {
   next.attendance = mergeAttendance(next.attendance, mine.attendance);
   next.kajalSeeded = Boolean(next.kajalSeeded || mine.kajalSeeded);
   next.octoberStaffSeeded = Boolean(next.octoberStaffSeeded || mine.octoberStaffSeeded);
+  next.payRulesV20 = Boolean(next.payRulesV20 || mine.payRulesV20);
   return next;
 }
 
@@ -650,7 +669,7 @@ async function refreshState() {
   state = hydrateState(payload.state || defaultState());
   markAttendanceSynced();
   lastRefreshAt = Date.now();
-  if (!flags.kajalSeeded || !flags.octoberStaffSeeded) {
+  if (!flags.kajalSeeded || !flags.octoberStaffSeeded || !flags.payRulesV20) {
     await flushPersist();
   }
   return state;
@@ -750,22 +769,66 @@ function spanMinutes(start, end) {
   return wrapped;
 }
 
-function workedHours(record) {
-  if (!["present", "late"].includes(record.status)) return 0;
+function workSegments(record) {
   const segments = [];
   if (record.clockIn && record.clockOut) segments.push([record.clockIn, record.clockOut]);
   if (record.clockIn3 && record.clockOut3) segments.push([record.clockIn3, record.clockOut3]);
   if (record.clockIn2 && record.clockOut2) segments.push([record.clockIn2, record.clockOut2]);
+  return segments;
+}
+
+function otSpanMinutes(start, end) {
+  const a = timeToMinutes(start);
+  const b = timeToMinutes(end);
+  const cut = timeToMinutes(OT_CUTOFF);
+  if (a == null || b == null || cut == null) return 0;
+  if (b > a) {
+    if (a >= cut) return 0;
+    return Math.min(b, cut) - a;
+  }
+  if (a >= cut) return 0;
+  return cut - a;
+}
+
+function workedHours(record) {
+  if (!["present", "late"].includes(record.status)) return 0;
   let mins = 0;
-  for (const [start, end] of segments) mins += spanMinutes(start, end);
+  for (const [start, end] of workSegments(record)) mins += spanMinutes(start, end);
+  return Math.max(0, Math.round((mins / 60) * 10) / 10);
+}
+
+function otWorkedHours(record) {
+  if (!["present", "late"].includes(record.status)) return 0;
+  let mins = 0;
+  for (const [start, end] of workSegments(record)) mins += otSpanMinutes(start, end);
   return Math.max(0, Math.round((mins / 60) * 10) / 10);
 }
 
 function overtimeHours(record) {
-  return Math.max(0, Math.round((workedHours(record) - SHIFT_HOURS) * 10) / 10);
+  return Math.max(0, Math.round((otWorkedHours(record) - SHIFT_HOURS) * 10) / 10);
+}
+
+function canRotateShift(emp, rec) {
+  const assigned = emp?.defaultShift || rec?.shift;
+  return assigned === "morning" || assigned === "afternoon";
+}
+
+function inferShiftFromTimes(clockIn, fallback = "morning") {
+  const mins = timeToMinutes(clockIn);
+  if (mins == null) return fallback === "afternoon" ? "afternoon" : "morning";
+  if (mins < 12 * 60 + 30) return "morning";
+  return "afternoon";
+}
+
+function applyRotatingShift(rec, emp) {
+  if (!canRotateShift(emp, rec) || !rec.clockIn) return rec;
+  rec.shift = inferShiftFromTimes(rec.clockIn, rec.shift || emp?.defaultShift || "morning");
+  return rec;
 }
 
 function applyWorkRules(rec, opts = {}) {
+  const emp = employeeById(rec.employeeId);
+  applyRotatingShift(rec, emp);
   if (opts.fromClock) {
     rec.status = deriveStatus(rec.shift, rec.clockIn, "present", rec.employeeId);
   } else if (!["leave", "off", "absent"].includes(rec.status)) {
@@ -1202,7 +1265,7 @@ function employeeForm(emp) {
           <select name="status">${STATUSES.map((s) => `<option ${v.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>
         </label>
         <label class="field"><span>Hire date</span><input name="hireDate" type="date" value="${esc(v.hireDate)}" required></label>
-        <label class="field"><span>Default shift</span>
+        <label class="field"><span>Default shift (morning/afternoon can rotate)</span>
           <select name="defaultShift">${Object.entries(SHIFTS)
             .map(([k, s]) => `<option value="${k}" ${v.defaultShift === k ? "selected" : ""}>${s.label}</option>`)
             .join("")}</select>
@@ -1549,8 +1612,8 @@ function renderAttendance() {
         <h1>Attendance</h1>
         <p class="lede">${
           ui.attView === "month"
-            ? `Monthly register · ${esc(periodLabel(ui.attPeriod))}. Late: morning after 10:00 AM, afternoon after 2:00 PM, break shift after 10:00 AM. OT after 9 hours.`
-            : "Daily roster. Late after 10:00 AM (morning / break) or 2:00 PM (afternoon). Hours over 9 count as OT."
+            ? `Monthly register · ${esc(periodLabel(ui.attPeriod))}. Morning/afternoon rotate by punch: 10:00 AM start is morning, 2:00 PM start is afternoon. Late after that start. OT is hours over 9, only until 11:00 PM.`
+            : "Daily roster. Morning/afternoon rotate by punch time. Late after 10:00 AM or 2:00 PM for the shift they actually worked. OT after 9 hours, not after 11:00 PM."
         }</p>
       </div>
       <button class="btn" data-action="add-attendance">Add attendance</button>
@@ -1570,7 +1633,7 @@ function attendanceForm(rec, preset = {}) {
   const spec = SHIFTS[shift];
   return `
     <h2>${rec ? "Edit attendance" : "Add attendance"}</h2>
-    <p class="lede">Punch the times they actually worked. Break shift is two sessions plus optional call-in OT in the unpaid gap. Hours over 9 are OT.</p>
+    <p class="lede">Punch the times they actually worked. Morning and afternoon can swap: 10:00–19:00 or 14:00–23:00. Break shift is two sessions plus optional call-in OT. Hours over 9 until 11:00 PM are OT; time after 11:00 PM is not OT.</p>
     <form data-form="save-attendance" data-id="${esc(rec?.id || "")}">
       <div class="form-grid">
         <label class="field"><span>Staff</span>
@@ -2050,7 +2113,7 @@ function renderPayslip(id) {
         <div><span>Weekly offs taken (entitled ${pay.weeklyOffEntitled})</span><strong>${pay.weeklyOff}</strong></div>
         <div><span>Unused weekly offs paid extra (${pay.unusedWeeklyOffs} × ${formatInr(pay.dailyRate)})</span><strong>${formatInr(pay.weeklyOffWorkPay)}</strong></div>
         <div><span>Basic salary</span><strong>${formatInr(pay.basicPay)}</strong></div>
-        <div><span>Overtime (hours over 9) ${formatHours(pay.overtimeHours)} × 150%</span><strong>${formatInr(pay.overtimePay)}</strong></div>
+        <div><span>Overtime (hours over 9, until 11:00 PM) ${formatHours(pay.overtimeHours)} × 150%</span><strong>${formatInr(pay.overtimePay)}</strong></div>
         <div><span>Evening premium ${formatHours(pay.eveningHours)} × 30%</span><strong>${formatInr(pay.eveningPay)}</strong></div>
         <div><span>Meal allowance</span><strong>${formatInr(pay.meal)}</strong></div>
         <div><span>Evening allowance</span><strong>${formatInr(pay.eveningAllow)}</strong></div>
@@ -2201,7 +2264,7 @@ function renderMyDay() {
         <p class="hint">${
           emp.defaultShift === "break"
             ? `Your break shift: ${formatClock(breakTimes(emp).in)}–${formatClock(breakTimes(emp).out)} then ${formatClock(breakTimes(emp).in2)}–${formatClock(breakTimes(emp).out2)}. Punch First in/out and Second in/out at your real times. Gap is unpaid unless you use Call-in OT. Hours over 9 are OT.`
-            : "Shifts are 9 hours. Time beyond 9 hours is overtime at 150%. Leave needs owner approval."
+            : "Morning and afternoon can rotate. Work 9 hours from 10:00 AM or 2:00 PM. Time beyond 9 hours is OT at 150% until 11:00 PM. Leave needs owner approval."
         }</p>
       </section>
       <section class="panel">
