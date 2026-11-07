@@ -2,7 +2,7 @@ const STORAGE_KEY = "toc-hr-v3";
 const SESSION_KEY = "toc-hr-session";
 const STANDARD_HOURS = 9;
 const SHIFT_HOURS = 9;
-const OT_CUTOFF = "23:00";
+const OT_CUTOFF = "23:30";
 const WEEKLY_OFFS_PER_MONTH = 4;
 const LEAVE_BLOCKED_WEEKDAYS = [0, 5, 6];
 const OWNER_PASSWORD = "3oclock";
@@ -511,7 +511,7 @@ function applyPayRulesToAttendance(data) {
     }
     rec.overtimeHours = overtimeHours(rec);
   }
-  data.payRulesV20 = true;
+  data.payRulesV21 = true;
   return data;
 }
 
@@ -642,7 +642,7 @@ function mergeStates(server, local) {
   next.attendance = mergeAttendance(next.attendance, mine.attendance);
   next.kajalSeeded = Boolean(next.kajalSeeded || mine.kajalSeeded);
   next.octoberStaffSeeded = Boolean(next.octoberStaffSeeded || mine.octoberStaffSeeded);
-  next.payRulesV20 = Boolean(next.payRulesV20 || mine.payRulesV20);
+  next.payRulesV21 = Boolean(next.payRulesV21 || mine.payRulesV21);
   return next;
 }
 
@@ -669,7 +669,7 @@ async function refreshState() {
   state = hydrateState(payload.state || defaultState());
   markAttendanceSynced();
   lastRefreshAt = Date.now();
-  if (!flags.kajalSeeded || !flags.octoberStaffSeeded || !flags.payRulesV20) {
+  if (!flags.kajalSeeded || !flags.octoberStaffSeeded || !flags.payRulesV21) {
     await flushPersist();
   }
   return state;
@@ -1056,7 +1056,6 @@ function renderLogin(error = "") {
                   <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
                   <button class="btn full" type="submit">Enter</button>
                   <div class="hint">
-                    <p><strong>Owner</strong> — username <code>owner</code> · password <code>3oclock</code></p>
                     <p>Staff: use <strong>Create account</strong>, then sign in with your username.</p>
                   </div>
                 </form>`
@@ -1612,8 +1611,8 @@ function renderAttendance() {
         <h1>Attendance</h1>
         <p class="lede">${
           ui.attView === "month"
-            ? `Monthly register · ${esc(periodLabel(ui.attPeriod))}. Morning/afternoon rotate by punch: 10:00 AM start is morning, 2:00 PM start is afternoon. Late after that start. OT is hours over 9, only until 11:00 PM.`
-            : "Daily roster. Morning/afternoon rotate by punch time. Late after 10:00 AM or 2:00 PM for the shift they actually worked. OT after 9 hours, not after 11:00 PM."
+            ? `Monthly register · ${esc(periodLabel(ui.attPeriod))}. Morning/afternoon rotate by punch: 10:00 AM start is morning, 2:00 PM start is afternoon. Late after that start. OT is hours over 9, only until 11:30 PM.`
+            : "Daily roster. Morning/afternoon rotate by punch time. Late after 10:00 AM or 2:00 PM for the shift they actually worked. OT after 9 hours, not after 11:30 PM."
         }</p>
       </div>
       <button class="btn" data-action="add-attendance">Add attendance</button>
@@ -1633,7 +1632,7 @@ function attendanceForm(rec, preset = {}) {
   const spec = SHIFTS[shift];
   return `
     <h2>${rec ? "Edit attendance" : "Add attendance"}</h2>
-    <p class="lede">Punch the times they actually worked. Morning and afternoon can swap: 10:00–19:00 or 14:00–23:00. Break shift is two sessions plus optional call-in OT. Hours over 9 until 11:00 PM are OT; time after 11:00 PM is not OT.</p>
+    <p class="lede">Punch the times they actually worked. Morning and afternoon can swap: 10:00–19:00 or 14:00–23:00. Break shift is two sessions plus optional call-in OT. Hours over 9 until 11:30 PM are OT; time after 11:30 PM is not OT.</p>
     <form data-form="save-attendance" data-id="${esc(rec?.id || "")}">
       <div class="form-grid">
         <label class="field"><span>Staff</span>
@@ -2113,7 +2112,7 @@ function renderPayslip(id) {
         <div><span>Weekly offs taken (entitled ${pay.weeklyOffEntitled})</span><strong>${pay.weeklyOff}</strong></div>
         <div><span>Unused weekly offs paid extra (${pay.unusedWeeklyOffs} × ${formatInr(pay.dailyRate)})</span><strong>${formatInr(pay.weeklyOffWorkPay)}</strong></div>
         <div><span>Basic salary</span><strong>${formatInr(pay.basicPay)}</strong></div>
-        <div><span>Overtime (hours over 9, until 11:00 PM) ${formatHours(pay.overtimeHours)} × 150%</span><strong>${formatInr(pay.overtimePay)}</strong></div>
+        <div><span>Overtime (hours over 9, until 11:30 PM) ${formatHours(pay.overtimeHours)} × 150%</span><strong>${formatInr(pay.overtimePay)}</strong></div>
         <div><span>Evening premium ${formatHours(pay.eveningHours)} × 30%</span><strong>${formatInr(pay.eveningPay)}</strong></div>
         <div><span>Meal allowance</span><strong>${formatInr(pay.meal)}</strong></div>
         <div><span>Evening allowance</span><strong>${formatInr(pay.eveningAllow)}</strong></div>
@@ -2264,7 +2263,7 @@ function renderMyDay() {
         <p class="hint">${
           emp.defaultShift === "break"
             ? `Your break shift: ${formatClock(breakTimes(emp).in)}–${formatClock(breakTimes(emp).out)} then ${formatClock(breakTimes(emp).in2)}–${formatClock(breakTimes(emp).out2)}. Punch First in/out and Second in/out at your real times. Gap is unpaid unless you use Call-in OT. Hours over 9 are OT.`
-            : "Morning and afternoon can rotate. Work 9 hours from 10:00 AM or 2:00 PM. Time beyond 9 hours is OT at 150% until 11:00 PM. Leave needs owner approval."
+            : "Morning and afternoon can rotate. Work 9 hours from 10:00 AM or 2:00 PM. Time beyond 9 hours is OT at 150% until 11:30 PM. Leave needs owner approval."
         }</p>
       </section>
       <section class="panel">
