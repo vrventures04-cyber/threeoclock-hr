@@ -515,6 +515,29 @@ function applyPayRulesToAttendance(data) {
   return data;
 }
 
+function reclassifyLeavePool(data) {
+  const prev = state;
+  state = data;
+  try {
+    const leaves = (data.leaves || [])
+      .filter((l) => l.status && l.status !== "rejected")
+      .sort((a, b) => String(a.from || "").localeCompare(String(b.from || "")));
+    for (const leave of leaves) {
+      const days = classifyLeaveDays(leave.employeeId, leave.from, leave.to, leave.id);
+      const before = JSON.stringify(leave.days || []);
+      leave.days = days;
+      leave.type = days.every((d) => d.kind === "off")
+        ? "off"
+        : days.every((d) => d.kind === "unpaid")
+          ? "unpaid"
+          : "mixed";
+      if (leave.status === "approved" && before !== JSON.stringify(days)) applyLeaveToRoster(leave);
+    }
+  } finally {
+    state = prev;
+  }
+}
+
 function hydrateState(parsed) {
   parsed.employees = (parsed.employees || []).map(normalizeEmployee);
   parsed.leaves = parsed.leaves || [];
@@ -525,6 +548,7 @@ function hydrateState(parsed) {
   if (!parsed.users.some((u) => u.role === "owner")) parsed.users = [...ownerAccounts(), ...parsed.users];
   if (!parsed.kajalSeeded) ensureKajal(parsed);
   if (!parsed.octoberStaffSeeded) ensureOctoberStaff(parsed);
+  reclassifyLeavePool(parsed);
   applyPayRulesToAttendance(parsed);
   return parsed;
 }
@@ -894,10 +918,9 @@ function computePayroll(emp, period) {
   const eveningHours = eveningRows.reduce((s, r) => s + workedHours(r), 0);
   const daily = monthDays ? emp.baseSalary / monthDays : 0;
   const hourly = daily / STANDARD_HOURS;
-  const weeklyOffEntitled = monthDays
-    ? Math.max(0, Math.round(WEEKLY_OFFS_PER_MONTH * (onRollDays / monthDays)))
-    : 0;
-  const unusedWeeklyOffs = Math.max(0, weeklyOffEntitled - weeklyOff);
+  const weeklyOffEntitled = weeklyOffEntitledInMonth(emp, period);
+  const weeklyOffTaken = paidOffDatesInMonth(emp.id, period).size;
+  const unusedWeeklyOffs = Math.max(0, weeklyOffEntitled - weeklyOffTaken);
   const weeklyOffWorkPay = unusedWeeklyOffs * daily;
   const shortHours = rows.reduce((s, r) => {
     if (!["present", "late"].includes(r.status) || !workSegments(r).length) return s;
@@ -922,7 +945,7 @@ function computePayroll(emp, period) {
     absent,
     late,
     leave,
-    weeklyOff,
+    weeklyOff: weeklyOffTaken,
     weeklyOffEntitled,
     unusedWeeklyOffs,
     weeklyOffWorkPay,
